@@ -15,6 +15,11 @@ from typing import TypedDict, Optional
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+try:
+    from langgraph.checkpoint.mongodb.aio import AsyncMongoDBSaver
+    _MONGO_CHECKPOINTER_AVAILABLE = True
+except ImportError:
+    _MONGO_CHECKPOINTER_AVAILABLE = False
 
 from memory import short_term
 from utils.logging import get_logger
@@ -236,7 +241,22 @@ async def run_oracle_graph(
     agent = MaterialAgent(material)
     workflow = _make_oracle_graph(agent)
 
-    checkpointer = MemorySaver() if use_checkpointer else None
+    checkpointer = None
+    if use_checkpointer:
+        if _MONGO_CHECKPOINTER_AVAILABLE:
+            try:
+                from db.connection import get_async_client
+                client = get_async_client()
+                from config.settings import settings
+                db_name = settings.mongodb_db
+                checkpointer = AsyncMongoDBSaver(client[db_name]["agent_checkpoints"])
+                log.info("Using AsyncMongoDBSaver for LangGraph checkpoints")
+            except Exception as exc:
+                log.warning("AsyncMongoDBSaver init failed, falling back to MemorySaver",
+                            error=str(exc))
+                checkpointer = MemorySaver()
+        else:
+            checkpointer = MemorySaver()
     graph = workflow.compile(checkpointer=checkpointer)
 
     thread_id = f"oracle_{material}_{task.get('trigger', 'run')}_{uuid.uuid4().hex[:8]}"

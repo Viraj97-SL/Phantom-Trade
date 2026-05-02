@@ -58,11 +58,25 @@ class MaterialAgent(BaseAgent):
         current_thesis = await self._get_current_thesis()
         trigger = task.get("trigger", "nightly_run")
 
-        # Load best prior strategy
+        # Load best prior strategy from reasoning bank
         best = memory.best_strategy()
         tool_order = best.tool_priority_order if best else [
             "brave_news", "commodity_price", "claim_verdicts"
         ]
+
+        # Override with skill library card if available (higher priority)
+        try:
+            from memory.long_term import get_skill_card
+            skill_card = await get_skill_card(f"material_agent_{self.material}")
+            if skill_card and skill_card.get("tool_priority_order"):
+                if not best or skill_card.get("version", 1) >= 2:
+                    tool_order = skill_card["tool_priority_order"]
+                    log.info("Skill card loaded",
+                             material=self.material,
+                             version=skill_card.get("version"),
+                             tool_order=tool_order)
+        except Exception:
+            pass
 
         plan = {
             "steps": [

@@ -46,13 +46,21 @@ async def get_commodity_price(material: str) -> Optional[dict]:
                 change = None
                 if price_float and prev_float:
                     change = round(((price_float - prev_float) / prev_float) * 100, 2)
-                return {
+                result = {
                     "material": material,
                     "price": price_float,
                     "date": date,
                     "change_pct": change,
                     "source": "FRED",
                 }
+                # Persist to time-series collection (non-blocking)
+                if price_float is not None:
+                    try:
+                        from utils.metrics import store_price_point
+                        await store_price_point(material, price_float, change, date)
+                    except Exception:
+                        pass
+                return result
     except Exception as e:
         log.warning("FRED fetch failed", material=material, error=str(e))
         return None

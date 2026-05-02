@@ -80,6 +80,21 @@ async def get_fact_history(entity: str) -> List[KnowledgeFact]:
     return history
 
 
+async def get_skill_card(agent_type: str) -> Optional[dict]:
+    """Fetch the latest skill card for an agent type from skill_library."""
+    try:
+        db = get_db()
+        doc = await db.skill_library.find_one(
+            {"agent_type": agent_type},
+            sort=[("version", -1)],
+        )
+        if doc:
+            doc.pop("_id", None)
+        return doc
+    except Exception:
+        return None
+
+
 async def search_facts(query_text: str, limit: int = 10) -> List[KnowledgeFact]:
     """Text search over currently valid facts."""
     db = get_db()

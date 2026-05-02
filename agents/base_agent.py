@@ -141,6 +141,21 @@ class BaseAgent(ABC):
                  agent_id=self.agent_id,
                  latency_ms=elapsed,
                  status=result.get("status", "ok"))
+
+        # Write performance metric to time-series collection (non-blocking)
+        try:
+            from utils.metrics import record_agent_metric
+            await record_agent_metric(
+                agent_id=self.agent_id,
+                pipeline=self.pipeline,
+                outcome=result.get("status", "ok"),
+                latency_ms=elapsed,
+                confidence=result.get("confidence"),
+                material=result.get("material"),
+            )
+        except Exception:
+            pass
+
         return result
 
     # ── Memory Loading ────────────────────────────────────────────────────

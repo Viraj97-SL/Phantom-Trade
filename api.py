@@ -5,7 +5,7 @@ Run: uvicorn api:app --reload --port 8000
 """
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException
@@ -308,6 +308,57 @@ async def _sse_demo_stream(claim_text: str) -> AsyncGenerator[str, None]:
     yield event("reasoning_bank_updated", stats)
 
     yield event("pipeline_complete", {"claim_id": claim_id})
+
+
+# ── Price & Metrics endpoints ─────────────────────────────────────────────────
+
+@app.get("/api/prices/{material}")
+async def get_price_history(material: str, days: int = 30):
+    """Return commodity price history from commodity_prices_ts."""
+    from db.connection import get_db
+    from datetime import timezone
+    db = get_db()
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
+    try:
+        cursor = db.commodity_prices_ts.find(
+            {"metadata.material": material, "timestamp": {"$gte": cutoff}},
+            sort=[("timestamp", 1)],
+            projection={"_id": 0, "timestamp": 1, "price": 1,
+                        "change_pct": 1, "fred_date": 1},
+        )
+        points = await cursor.to_list(length=200)
+        for p in points:
+            if hasattr(p.get("timestamp"), "isoformat"):
+                p["timestamp"] = p["timestamp"].isoformat()
+        return {"material": material, "days": days, "count": len(points), "prices": points}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/metrics")
+async def get_agent_metrics(pipeline: str = None, days: int = 7):
+    """Return agent performance metrics from agent_metrics_ts."""
+    from db.connection import get_db
+    from datetime import timezone
+    db = get_db()
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
+    query: dict = {"timestamp": {"$gte": cutoff}}
+    if pipeline:
+        query["metadata.pipeline"] = pipeline
+    try:
+        cursor = db.agent_metrics_ts.find(
+            query,
+            sort=[("timestamp", -1)],
+            projection={"_id": 0, "timestamp": 1, "metadata": 1,
+                        "latency_ms": 1, "confidence": 1, "outcome": 1},
+        )
+        docs = await cursor.to_list(length=500)
+        for d in docs:
+            if hasattr(d.get("timestamp"), "isoformat"):
+                d["timestamp"] = d["timestamp"].isoformat()
+        return {"days": days, "count": len(docs), "metrics": docs}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/demo/stream")

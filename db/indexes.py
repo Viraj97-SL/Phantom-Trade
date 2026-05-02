@@ -80,6 +80,40 @@ async def create_all_indexes() -> None:
     ])
     log.info("procurement_advisories indexes created")
 
+    # ── agent_metrics_ts (time-series) ──────────────────────────────────────
+    try:
+        await db.command({
+            "create": "agent_metrics_ts",
+            "timeseries": {
+                "timeField": "timestamp",
+                "metaField": "metadata",
+                "granularity": "seconds",
+            },
+        })
+        log.info("agent_metrics_ts time-series collection created")
+    except Exception as e:
+        if "already exists" in str(e).lower() or "48" in str(e):
+            log.info("agent_metrics_ts already exists")
+        else:
+            log.warning("agent_metrics_ts creation failed", error=str(e))
+
+    # ── commodity_prices_ts (time-series) ────────────────────────────────────
+    try:
+        await db.command({
+            "create": "commodity_prices_ts",
+            "timeseries": {
+                "timeField": "timestamp",
+                "metaField": "metadata",
+                "granularity": "hours",
+            },
+        })
+        log.info("commodity_prices_ts time-series collection created")
+    except Exception as e:
+        if "already exists" in str(e).lower() or "48" in str(e):
+            log.info("commodity_prices_ts already exists")
+        else:
+            log.warning("commodity_prices_ts creation failed", error=str(e))
+
     log.info("All compound indexes created successfully")
 
 

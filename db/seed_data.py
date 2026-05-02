@@ -342,6 +342,73 @@ async def seed_knowledge_facts() -> None:
     log.info("Knowledge facts seeded", count=len(facts))
 
 
+async def seed_agent_metrics() -> None:
+    """Seed 30 days of synthetic agent performance metrics."""
+    db = get_db()
+    await db.agent_metrics_ts.delete_many({})
+    now = datetime.utcnow()
+
+    import random
+    docs = []
+    agents = [
+        ("material_agent_soybeans", "oracle", "soybeans"),
+        ("material_agent_neon", "oracle", "neon"),
+        ("material_agent_palladium", "oracle", "palladium"),
+        ("material_agent_lithium", "oracle", "lithium"),
+        ("forensics_orchestrator", "forensics", None),
+    ]
+    outcomes = ["ok", "ok", "ok", "thesis_updated", "ok", "no_change"]
+
+    for day_offset in range(30, 0, -1):
+        ts = now - timedelta(days=day_offset, hours=random.randint(0, 5))
+        for agent_id, pipeline, material in agents:
+            # Latency improves over time (learning effect)
+            base_latency = max(800, 4000 - day_offset * 80 + random.randint(-200, 200))
+            docs.append({
+                "timestamp": ts,
+                "metadata": {"agent_id": agent_id, "pipeline": pipeline, "material": material},
+                "latency_ms": base_latency,
+                "outcome": random.choice(outcomes),
+                "confidence": round(random.uniform(0.72, 0.97), 2),
+            })
+
+    await db.agent_metrics_ts.insert_many(docs)
+    log.info("agent_metrics_ts seeded", count=len(docs))
+
+
+async def seed_commodity_prices() -> None:
+    """Seed 60 days of synthetic commodity price history."""
+    db = get_db()
+    await db.commodity_prices_ts.delete_many({})
+    now = datetime.utcnow()
+
+    import random
+    base_prices = {
+        "soybeans": 450.0,
+        "palladium": 950.0,
+        "lithium": 14000.0,
+    }
+    docs = []
+
+    for material, base in base_prices.items():
+        price = base
+        for day_offset in range(60, 0, -1):
+            ts = now - timedelta(days=day_offset)
+            change_pct = round(random.uniform(-2.5, 2.5), 2)
+            price = round(price * (1 + change_pct / 100), 2)
+            fred_date = (now - timedelta(days=day_offset)).strftime("%Y-%m-%d")
+            docs.append({
+                "timestamp": ts,
+                "metadata": {"material": material, "source": "FRED"},
+                "price": price,
+                "change_pct": change_pct,
+                "fred_date": fred_date,
+            })
+
+    await db.commodity_prices_ts.insert_many(docs)
+    log.info("commodity_prices_ts seeded", count=len(docs))
+
+
 async def main():
     ok = await ping_db()
     if not ok:
@@ -353,6 +420,8 @@ async def main():
     await seed_reasoning_bank()
     await seed_skill_library()
     await seed_knowledge_facts()
+    await seed_agent_metrics()
+    await seed_commodity_prices()
     log.info("All seed data populated successfully")
 
 
