@@ -1,0 +1,39 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Python
+*.pyc
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.log
+
+# Data
+data/raw/
+*.csv
+
+# Frontend build artefacts (kept in ui/)
+ui/node_modules/
+ui/.next/
+ui/out/
+ui/build/
+ui/.vercel/
+ui/coverage/
+ui/*.tsbuildinfo
+
+# macOS
+.DS_Store
+
+# Claude
+mnt/
+claude_instructions.md

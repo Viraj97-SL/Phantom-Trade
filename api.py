@@ -1,0 +1,323 @@
+"""
+api.py
+PHANTOM TRADE — FastAPI REST + SSE backend.
+Run: uvicorn api:app --reload --port 8000
+"""
+import asyncio
+import json
+from datetime import datetime
+from typing import AsyncGenerator
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from utils.logging import setup_logging, get_logger
+
+setup_logging()
+log = get_logger(__name__)
+
+app = FastAPI(title="Phantom Trade API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+ROTTERDAM_CLAIM = (
+    "BREAKING: Rotterdam port workers have voted for indefinite strike action "
+    "effective immediately. All soybean cargo operations halted. "
+    "Sources: Reuters. #Rotterdam #SupplyChain"
+)
+
+
+# ── Request / Response models ─────────────────────────────────────────────────
+
+class AnalyseRequest(BaseModel):
+    claim_text: str
+
+
+class PointInTimeRequest(BaseModel):
+    as_of: str  # ISO date string
+
+
+# ── Health ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/health")
+async def health():
+    from db.connection import ping_db
+    mongo_ok = await ping_db()
+    try:
+        from utils.llm import get_haiku
+        llm = get_haiku()
+        llm_ok = len(llm._providers) > 0
+    except Exception:
+        llm_ok = False
+    return {"status": "ok", "mongodb": mongo_ok, "llm": llm_ok}
+
+
+# ── Thesis endpoints ──────────────────────────────────────────────────────────
+
+@app.get("/api/thesis")
+async def get_theses():
+    from agents.oracle.orchestrator import get_all_thesis
+    return await get_all_thesis()
+
+
+@app.get("/api/thesis/{material}/history")
+async def thesis_history(material: str):
+    from agents.oracle.orchestrator import get_thesis_history
+    return await get_thesis_history(material)
+
+
+@app.get("/api/thesis/{material}/at/{date}")
+async def thesis_at(material: str, date: str):
+    """Return thesis valid at a specific point in time."""
+    from db.connection import get_db
+    from datetime import datetime as dt
+    db = get_db()
+    try:
+        as_of = dt.fromisoformat(date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use ISO 8601.")
+    doc = await db.supply_theses.find_one(
+        {
+            "material": material,
+            "valid_from": {"$lte": as_of},
+            "$or": [{"valid_to": None}, {"valid_to": {"$gt": as_of}}],
+        },
+        sort=[("valid_from", -1)],
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="No thesis found for that point in time.")
+    doc["_id"] = str(doc["_id"])
+    return doc
+
+
+# ── Forensics endpoints ───────────────────────────────────────────────────────
+
+@app.post("/api/forensics/analyse")
+async def analyse(body: AnalyseRequest):
+    from agents.forensics.orchestrator import analyse_claim
+    verdict = await analyse_claim(body.claim_text)
+    return verdict.model_dump()
+
+
+@app.get("/api/forensics/verdicts")
+async def get_verdicts():
+    from agents.forensics.orchestrator import get_recent_verdicts
+    return await get_recent_verdicts(10)
+
+
+@app.get("/api/forensics/variants/{claim_id}")
+async def get_variants(claim_id: str):
+    from agents.forensics.tracker_agent import get_variants_for_claim
+    variants = await get_variants_for_claim(claim_id)
+    return [v.model_dump() for v in variants]
+
+
+# ── Reasoning Bank endpoints ──────────────────────────────────────────────────
+
+@app.get("/api/reasoning-bank/stats")
+async def rb_stats():
+    from memory.reasoning_bank import get_bank_stats
+    return await get_bank_stats()
+
+
+@app.get("/api/reasoning-bank/recent")
+async def rb_recent():
+    from db.connection import get_db
+    db = get_db()
+    entries = []
+    async for doc in db.reasoning_bank.find().sort("created_at", -1).limit(5):
+        doc["_id"] = str(doc["_id"])
+        # Serialise datetime fields
+        for k, v in doc.items():
+            if isinstance(v, datetime):
+                doc[k] = v.isoformat()
+        entries.append(doc)
+    return entries
+
+
+# ── Demo endpoints ────────────────────────────────────────────────────────────
+
+@app.post("/api/demo/inject-claim")
+async def inject_demo_claim():
+    from agents.forensics.orchestrator import analyse_claim
+    verdict = await analyse_claim(ROTTERDAM_CLAIM)
+    return verdict.model_dump()
+
+
+@app.post("/api/demo/reset")
+async def reset_demo():
+    """Reset theses back to seed values."""
+    from db.connection import get_db
+    from datetime import datetime as dt
+    db = get_db()
+    baseline = [
+        {"material": "soybeans", "risk_level": 28, "risk_label": "STABLE",
+         "narrative": "Baseline soybean supply is stable."},
+        {"material": "neon", "risk_level": 45, "risk_label": "ELEVATED",
+         "narrative": "Neon supply elevated due to regional tensions."},
+        {"material": "palladium", "risk_level": 35, "risk_label": "STABLE",
+         "narrative": "Palladium markets stable."},
+        {"material": "lithium", "risk_level": 52, "risk_label": "ELEVATED",
+         "narrative": "Lithium demand outpacing supply."},
+    ]
+    now = dt.utcnow()
+    for item in baseline:
+        await db.supply_theses.update_many(
+            {"material": item["material"], "valid_to": None},
+            {"$set": {"valid_to": now}},
+        )
+        item["valid_from"] = now
+        item["valid_to"] = None
+        item["triggered_by"] = "demo_reset"
+        item["key_drivers"] = []
+        await db.supply_theses.insert_one(item)
+    return {"status": "reset", "materials": [i["material"] for i in baseline]}
+
+
+async def _sse_demo_stream(claim_text: str) -> AsyncGenerator[str, None]:
+    """Stream SSE events as the full forensics pipeline runs in real-time."""
+    def event(event_type: str, data: dict) -> str:
+        payload = json.dumps({"type": event_type, "data": data,
+                              "timestamp": datetime.utcnow().isoformat()},
+                             default=str)
+        return f"data: {payload}\n\n"
+
+    yield event("pipeline_started", {"claim_text": claim_text[:100]})
+
+    import uuid
+    from agents.forensics.tracker_agent import track_claim_variants
+    from agents.forensics.debate_agent import run_debate
+    from agents.forensics.orchestrator import (
+        _run_llm_forensics, _build_mutation_summary, _build_evidence,
+        _classify_supply_chain_topics,
+    )
+    from tools.forensics_search_tool import search_claim_in_news
+    from agents.oracle.orchestrator import handle_claim_verdict_trigger
+    from memory.reasoning_bank import get_bank_stats
+    from middleware.guardrails import check_prompt_injection
+    from models.schemas import ClaimVerdict
+    from db.connection import get_db
+
+    claim_id = str(uuid.uuid4())
+    db = get_db()
+
+    try:
+        check_prompt_injection(claim_text)
+    except ValueError as e:
+        yield event("error", {"message": str(e)})
+        return
+
+    # Step 1: Track variants
+    yield event("step", {"step": "tracking_variants",
+                          "message": "Tracking variants across 5 platforms..."})
+    variants = await track_claim_variants(claim_id, claim_text, claim_id)
+    for v in variants:
+        yield event("variant_found", v.model_dump())
+        await asyncio.sleep(0.25)
+
+    # Step 2: News cross-reference
+    yield event("step", {"step": "news_crossref",
+                          "message": "Cross-referencing against live news sources..."})
+    topics = _classify_supply_chain_topics(claim_text)
+    news_context = await search_claim_in_news(claim_text, topics)
+    yield event("news_crossref_complete", {
+        "major_outlets_reporting": news_context.get("major_outlets_reporting"),
+        "total_coverage": news_context.get("total_coverage"),
+        "summary": news_context.get("summary", ""),
+    })
+
+    # Step 3: LLM forensics
+    yield event("step", {"step": "forensics",
+                          "message": f"LLM analysing {len(variants)} variants for credibility signals..."})
+    forensics_reports = await _run_llm_forensics(variants, claim_text, news_context)
+    mutation_summary = _build_mutation_summary(variants, news_context)
+    yield event("forensics_complete", {
+        "reports_count": len(forensics_reports),
+        "mutation_summary": mutation_summary,
+    })
+
+    # Step 4: Debate
+    yield event("step", {"step": "debate",
+                          "message": "MAD-Sherlock debate agents deliberating..."})
+    variant_dicts = [v.model_dump() for v in variants]
+    report_dicts = [r.model_dump() for r in forensics_reports]
+    debate_verdict = await run_debate(
+        claim_id=claim_id,
+        claim_text=claim_text,
+        forensics_reports=report_dicts,
+        variants=variant_dicts,
+        news_context=news_context,
+    )
+    yield event("debate_complete", {
+        "pro_authentic_score": debate_verdict.pro_authentic_score,
+        "pro_fabricated_score": debate_verdict.pro_fabricated_score,
+        "consensus_verdict": debate_verdict.consensus_verdict,
+        "confidence": debate_verdict.confidence,
+    })
+
+    # Step 5: Verdict
+    yield event("step", {"step": "verdict", "message": "Writing verdict to MongoDB..."})
+    evidence = _build_evidence(forensics_reports, news_context)
+    verdict = ClaimVerdict(
+        claim_id=claim_id,
+        claim_text=claim_text,
+        verdict=debate_verdict.consensus_verdict,
+        confidence=debate_verdict.confidence,
+        evidence=evidence,
+        mutation_graph_summary=mutation_summary,
+        variants_analysed=len(variants),
+        debate_transcript=(
+            f"PRO-AUTHENTIC ({debate_verdict.pro_authentic_score:.2f}): "
+            f"{debate_verdict.pro_authentic_reasoning[:200]}\n\n"
+            f"PRO-FABRICATED ({debate_verdict.pro_fabricated_score:.2f}): "
+            f"{debate_verdict.pro_fabricated_reasoning[:200]}"
+        ),
+        supply_chain_topics=topics,
+    )
+
+    verdict_dict = verdict.model_dump()
+    # Serialise datetime
+    for k, v in verdict_dict.items():
+        if isinstance(v, datetime):
+            verdict_dict[k] = v.isoformat()
+
+    await db.claim_verdicts.insert_one(verdict.model_dump())
+    yield event("verdict_written", verdict_dict)
+
+    # Step 5: Oracle reaction
+    yield event("oracle_triggered", {"materials": topics, "verdict": verdict.verdict})
+    oracle_result = await handle_claim_verdict_trigger(
+        verdict_id=verdict.claim_id,
+        verdict=verdict.verdict,
+        affected_materials=[t for t in topics if t in
+                            ["soybeans", "neon", "palladium", "lithium"]],
+    )
+    for material, result in oracle_result.items():
+        yield event("thesis_updated", {"material": material, **result})
+
+    # Step 6: ReasoningBank
+    stats = await get_bank_stats()
+    yield event("reasoning_bank_updated", stats)
+
+    yield event("pipeline_complete", {"claim_id": claim_id})
+
+
+@app.get("/api/demo/stream")
+async def demo_stream(claim: str = ROTTERDAM_CLAIM):
+    """SSE stream — runs the full forensics+oracle pipeline and emits events."""
+    return StreamingResponse(
+        _sse_demo_stream(claim),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
