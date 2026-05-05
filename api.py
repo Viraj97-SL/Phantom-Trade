@@ -5,10 +5,11 @@ Run: uvicorn api:app --reload --port 8000
 """
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -18,7 +19,20 @@ from utils.logging import setup_logging, get_logger
 setup_logging()
 log = get_logger(__name__)
 
-app = FastAPI(title="Phantom Trade API", version="1.0.0")
+_DEFAULT_SCENARIO_ID = "builtin-rotterdam-strike"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from db.seed_scenarios import seed as seed_scenarios
+    try:
+        await seed_scenarios()
+    except Exception as exc:
+        log.warning("Scenario seeding failed (non-fatal)", error=str(exc))
+    yield
+
+
+app = FastAPI(title="Phantom Trade API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,12 +40,6 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-)
-
-ROTTERDAM_CLAIM = (
-    "BREAKING: Rotterdam port workers have voted for indefinite strike action "
-    "effective immediately. All soybean cargo operations halted. "
-    "Sources: Reuters. #Rotterdam #SupplyChain"
 )
 
 
@@ -120,6 +128,76 @@ async def get_variants(claim_id: str):
     return [v.model_dump() for v in variants]
 
 
+@app.get("/api/forensics/verdict/{claim_id}")
+async def get_verdict(claim_id: str):
+    from db.connection import get_db
+    db = get_db()
+    doc = await db.claim_verdicts.find_one({"claim_id": claim_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Verdict not found")
+    doc["_id"] = str(doc["_id"])
+    for k, v in doc.items():
+        if isinstance(v, datetime):
+            doc[k] = v.isoformat()
+    return doc
+
+
+# ── Scenario endpoints ────────────────────────────────────────────────────────
+
+class CreateScenarioRequest(BaseModel):
+    name: str
+    description: str = ""
+    claim_text: str
+    category: str = "custom"
+    tags: list[str] = []
+
+
+@app.get("/api/scenarios")
+async def list_scenarios(category: Optional[str] = Query(default=None)):
+    from db.scenarios import get_all_scenarios
+    scenarios = await get_all_scenarios()
+    if category:
+        scenarios = [s for s in scenarios if s.category == category]
+    return [s.model_dump() for s in scenarios]
+
+
+@app.get("/api/scenarios/{scenario_id}")
+async def get_scenario(scenario_id: str):
+    from db.scenarios import get_scenario_by_id
+    scenario = await get_scenario_by_id(scenario_id)
+    if not scenario:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    return scenario.model_dump()
+
+
+@app.post("/api/scenarios", status_code=201)
+async def create_scenario(body: CreateScenarioRequest):
+    from db.scenarios import create_scenario as db_create
+    from models.schemas import ScenarioTemplate
+    scenario = ScenarioTemplate(
+        name=body.name,
+        description=body.description,
+        claim_text=body.claim_text,
+        category=body.category,
+        tags=body.tags,
+        created_by="user",
+        is_builtin=False,
+    )
+    created = await db_create(scenario)
+    return created.model_dump()
+
+
+@app.delete("/api/scenarios/{scenario_id}", status_code=204)
+async def delete_scenario(scenario_id: str):
+    from db.scenarios import delete_scenario as db_delete
+    try:
+        deleted = await db_delete(scenario_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+
+
 # ── Reasoning Bank endpoints ──────────────────────────────────────────────────
 
 @app.get("/api/reasoning-bank/stats")
@@ -146,9 +224,17 @@ async def rb_recent():
 # ── Demo endpoints ────────────────────────────────────────────────────────────
 
 @app.post("/api/demo/inject-claim")
-async def inject_demo_claim():
+async def inject_demo_claim(scenario_id: Optional[str] = Query(default=None)):
     from agents.forensics.orchestrator import analyse_claim
-    verdict = await analyse_claim(ROTTERDAM_CLAIM)
+    from db.scenarios import get_scenario_by_id
+    sid = scenario_id or _DEFAULT_SCENARIO_ID
+    scenario = await get_scenario_by_id(sid)
+    claim_text = scenario.claim_text if scenario else (
+        "BREAKING: Rotterdam port workers have voted for indefinite strike action "
+        "effective immediately. All soybean cargo operations halted. "
+        "Sources: Reuters. #Rotterdam #SupplyChain"
+    )
+    verdict = await analyse_claim(claim_text)
     return verdict.model_dump()
 
 
@@ -199,6 +285,7 @@ async def _sse_demo_stream(claim_text: str) -> AsyncGenerator[str, None]:
         _run_llm_forensics, _build_mutation_summary, _build_evidence,
         _classify_supply_chain_topics,
     )
+    from tools.ml import score_claim_ml
     from tools.forensics_search_tool import search_claim_in_news
     from agents.oracle.orchestrator import handle_claim_verdict_trigger
     from memory.reasoning_bank import get_bank_stats
@@ -234,11 +321,20 @@ async def _sse_demo_stream(claim_text: str) -> AsyncGenerator[str, None]:
         "summary": news_context.get("summary", ""),
     })
 
-    # Step 3: LLM forensics
+    # Step 3: LLM forensics + ML scoring in parallel
     yield event("step", {"step": "forensics",
                           "message": f"LLM analysing {len(variants)} variants for credibility signals..."})
-    forensics_reports = await _run_llm_forensics(variants, claim_text, news_context)
+    yield event("step", {"step": "ml_forensics",
+                          "message": "Running ML scoring (TF-IDF, velocity, templates)..."})
+    forensics_reports, ml_result = await asyncio.gather(
+        _run_llm_forensics(variants, claim_text, news_context),
+        score_claim_ml(claim_id, variants, claim_text, news_context),
+    )
     mutation_summary = _build_mutation_summary(variants, news_context)
+    yield event("ml_forensics_complete", {
+        **ml_result.model_dump(),
+        "created_at": ml_result.created_at.isoformat(),
+    })
     yield event("forensics_complete", {
         "reports_count": len(forensics_reports),
         "mutation_summary": mutation_summary,
@@ -254,7 +350,7 @@ async def _sse_demo_stream(claim_text: str) -> AsyncGenerator[str, None]:
         claim_text=claim_text,
         forensics_reports=report_dicts,
         variants=variant_dicts,
-        news_context=news_context,
+        news_context={**news_context, "ml_result": ml_result.model_dump()},
     )
     yield event("debate_complete", {
         "pro_authentic_score": debate_verdict.pro_authentic_score,
@@ -281,6 +377,7 @@ async def _sse_demo_stream(claim_text: str) -> AsyncGenerator[str, None]:
             f"{debate_verdict.pro_fabricated_reasoning[:200]}"
         ),
         supply_chain_topics=topics,
+        ml_result=ml_result,
     )
 
     verdict_dict = verdict.model_dump()
@@ -362,10 +459,31 @@ async def get_agent_metrics(pipeline: str = None, days: int = 7):
 
 
 @app.get("/api/demo/stream")
-async def demo_stream(claim: str = ROTTERDAM_CLAIM):
-    """SSE stream — runs the full forensics+oracle pipeline and emits events."""
+async def demo_stream(
+    claim: Optional[str] = Query(default=None),
+    scenario_id: Optional[str] = Query(default=None),
+):
+    """SSE stream — runs the full forensics+oracle pipeline and emits events.
+    Accepts either a raw claim text or a scenario_id to load from the library.
+    Falls back to the default Rotterdam scenario when neither is provided.
+    """
+    from db.scenarios import get_scenario_by_id
+    if claim:
+        claim_text = claim
+    elif scenario_id:
+        scenario = await get_scenario_by_id(scenario_id)
+        if not scenario:
+            raise HTTPException(status_code=404, detail="Scenario not found")
+        claim_text = scenario.claim_text
+    else:
+        scenario = await get_scenario_by_id(_DEFAULT_SCENARIO_ID)
+        claim_text = scenario.claim_text if scenario else (
+            "BREAKING: Rotterdam port workers have voted for indefinite strike action "
+            "effective immediately. All soybean cargo operations halted. "
+            "Sources: Reuters. #Rotterdam #SupplyChain"
+        )
     return StreamingResponse(
-        _sse_demo_stream(claim),
+        _sse_demo_stream(claim_text),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

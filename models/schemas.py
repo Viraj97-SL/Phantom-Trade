@@ -4,6 +4,7 @@ All Pydantic v2 schemas for PHANTOM TRADE.
 These are the contracts between every agent and MongoDB.
 """
 from __future__ import annotations
+import uuid
 from datetime import datetime
 from typing import Optional, List, Literal, Any
 from pydantic import BaseModel, Field, field_validator
@@ -132,6 +133,20 @@ class EvidenceItem(BaseModel):
     source_variant_id: Optional[str] = None
 
 
+class MLForensicsResult(BaseModel):
+    claim_id: str
+    spread_velocity_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    variant_similarity_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    linguistic_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    source_credibility_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    template_match_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    coordinated_campaign_flag: bool = False
+    composite_ml_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    ml_flags: List[str] = Field(default_factory=list)
+    sub_scores: dict = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class ClaimVerdict(BaseModel):
     claim_id: str
     claim_text: str
@@ -143,6 +158,7 @@ class ClaimVerdict(BaseModel):
     debate_transcript: Optional[str] = None
     pipeline: Literal["forensics"] = "forensics"
     supply_chain_topics: List[str] = Field(default_factory=list)
+    ml_result: Optional[MLForensicsResult] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     verified_at: Optional[datetime] = None
     ground_truth: Optional[Literal["FABRICATED", "AUTHENTIC"]] = None
@@ -237,3 +253,26 @@ class DPOPair(BaseModel):
     reward_signal: float
     session_id: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ── SCENARIO TEMPLATES ────────────────────────────────────────────────────
+
+ScenarioCategory = Literal[
+    "port_strike", "sanctions", "weather",
+    "geopolitical", "financial", "custom"
+]
+
+
+class ScenarioTemplate(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = Field(min_length=3, max_length=80)
+    description: str = Field(default="", max_length=500)
+    claim_text: str = Field(min_length=20, max_length=2000)
+    category: str = "custom"
+    tags: List[str] = Field(default_factory=list)
+    created_by: str = "user"
+    is_builtin: bool = False
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        populate_by_name = True

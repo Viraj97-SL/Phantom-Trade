@@ -114,6 +114,14 @@ async def create_all_indexes() -> None:
         else:
             log.warning("commodity_prices_ts creation failed", error=str(e))
 
+    # ── scenario_templates ───────────────────────────────────────────────────
+    await db.scenario_templates.create_indexes([
+        IndexModel([("id", ASCENDING)], unique=True),
+        IndexModel([("category", ASCENDING), ("is_builtin", DESCENDING)]),
+        IndexModel([("created_by", ASCENDING), ("created_at", DESCENDING)]),
+    ])
+    log.info("scenario_templates indexes created")
+
     log.info("All compound indexes created successfully")
 
 

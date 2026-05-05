@@ -5,6 +5,7 @@ import Header from "@/components/Header";
 import DemoControlBar from "@/components/DemoControlBar";
 import ClaimInput from "@/components/forensics/ClaimInput";
 import VerdictCard from "@/components/forensics/VerdictCard";
+import VerdictHistory from "@/components/forensics/VerdictHistory";
 import RiskGauges from "@/components/oracle/RiskGauges";
 import ThesisSlider from "@/components/oracle/ThesisSlider";
 import RBStatsPanel from "@/components/reasoning-bank/RBStats";
@@ -13,9 +14,8 @@ import ImprovementChart from "@/components/reasoning-bank/ImprovementChart";
 import { useTheses } from "@/hooks/useTheses";
 import { useReasoningBank } from "@/hooks/useReasoningBank";
 import { api } from "@/lib/api";
-import type { ClaimVariant, ClaimVerdict, SSEEvent } from "@/types";
+import type { ClaimVariant, ClaimVerdict, SSEEvent, ScenarioTemplate } from "@/types";
 
-// React Flow must be client-side only
 const MutationGraph = dynamic(
   () => import("@/components/forensics/MutationGraph"),
   { ssr: false }
@@ -29,7 +29,9 @@ interface PipelineStep {
 
 const STEP_DEFS: PipelineStep[] = [
   { id: "tracking_variants", label: "Tracking variants across platforms...", done: false },
-  { id: "forensics", label: "Running forensics analysis...", done: false },
+  { id: "news_crossref", label: "Cross-referencing live news sources...", done: false },
+  { id: "ml_forensics", label: "Running ML scoring (TF-IDF, velocity, templates)...", done: false },
+  { id: "forensics", label: "LLM forensics analysis...", done: false },
   { id: "debate", label: "Debate agents deliberating...", done: false },
   { id: "verdict", label: "Writing verdict to MongoDB...", done: false },
 ];
@@ -67,6 +69,22 @@ export default function Home() {
           const d = event.data as { step: string; message: string };
           markStep(d.step);
           setRecentEvent(d.message);
+          break;
+        }
+        case "news_crossref_complete": {
+          const d = event.data as { total_coverage: number; major_outlets_reporting: boolean };
+          markStep("news_crossref");
+          setRecentEvent(
+            `News: ${d.total_coverage} sources · major outlets: ${d.major_outlets_reporting ? "yes" : "no"}`
+          );
+          break;
+        }
+        case "ml_forensics_complete": {
+          const d = event.data as { composite_ml_score: number; coordinated_campaign_flag: boolean };
+          markStep("ml_forensics");
+          setRecentEvent(
+            `ML score: ${Math.round(d.composite_ml_score * 100)}%${d.coordinated_campaign_flag ? " · coordinated campaign" : ""}`
+          );
           break;
         }
         case "verdict_written": {
@@ -114,14 +132,14 @@ export default function Home() {
   );
 
   const startStream = useCallback(
-    (claimText?: string) => {
+    (claimText?: string, scenarioId?: string) => {
       esRef.current?.close();
       setIsRunning(true);
       setVariants([]);
       setVerdict(null);
       setSteps(STEP_DEFS.map((s) => ({ ...s, done: false })));
 
-      const url = api.streamUrl(claimText);
+      const url = api.streamUrl(claimText, scenarioId);
       const es = new EventSource(url);
       esRef.current = es;
 
@@ -129,7 +147,7 @@ export default function Home() {
         try {
           handleSSEEvent(JSON.parse(e.data as string) as SSEEvent);
         } catch {
-          // ignore malformed
+          // ignore malformed events
         }
       };
       es.onerror = () => {
@@ -148,7 +166,14 @@ export default function Home() {
     [startStream]
   );
 
-  const handleDemo = useCallback(() => startStream(), [startStream]);
+  const handleRunScenario = useCallback(
+    (scenario: ScenarioTemplate) => {
+      startStream(undefined, scenario.id);
+    },
+    [startStream]
+  );
+
+  const handleRunDefault = useCallback(() => startStream(), [startStream]);
 
   const handleReset = useCallback(() => {
     setVariants([]);
@@ -162,7 +187,7 @@ export default function Home() {
     <div className="flex flex-col min-h-screen" style={{ background: "#0A0A0F" }}>
       <Header />
       <DemoControlBar
-        onInject={handleDemo}
+        onRunDefault={handleRunDefault}
         onReset={handleReset}
         recentEvent={recentEvent}
         isRunning={isRunning}
@@ -189,7 +214,7 @@ export default function Home() {
 
               <ClaimInput
                 onAnalyse={handleAnalyse}
-                onDemo={handleDemo}
+                onRunScenario={handleRunScenario}
                 isRunning={isRunning}
                 steps={steps}
               />
@@ -197,6 +222,14 @@ export default function Home() {
               <MutationGraph variants={variants} />
 
               {verdict && <VerdictCard verdict={verdict} />}
+            </div>
+
+            {/* Verdict history below forensics panel */}
+            <div
+              className="rounded-lg p-4"
+              style={{ background: "#111118", border: "1px solid #1E1E2E" }}
+            >
+              <VerdictHistory />
             </div>
           </div>
 

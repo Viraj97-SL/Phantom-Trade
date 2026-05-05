@@ -40,6 +40,31 @@ async def track_claim_variants(claim_id: str, claim_text: str,
     except Exception as e:
         log.warning("X tracking failed", error=str(e))
 
+    # ── Reddit search for real corroborating/sceptical posts ─────────────
+    try:
+        from tools.sources.reddit_tool import search as reddit_search
+        reddit_posts = await reddit_search(
+            " ".join(claim_text.split()[:8]), subreddit="supplychain"
+        )
+        for post in reddit_posts[:2]:
+            variants.append(ClaimVariant(
+                claim_id=claim_id,
+                variant_id=str(uuid.uuid4()),
+                platform="reddit",
+                variant_type="text_post",
+                parent_variant_id=None,
+                content_text=(post.get("title", "") + " " + post.get("selftext", ""))[:500],
+                author_handle=f"r/{post.get('subreddit', 'supplychain')}",
+                url=post.get("permalink", ""),
+                engagement_count=post.get("score", 0) + post.get("num_comments", 0),
+                metadata={
+                    "num_comments": post.get("num_comments", 0),
+                    "reddit_score": post.get("score", 0),
+                },
+            ))
+    except Exception as e:
+        log.warning("Reddit variant fetch failed", error=str(e))
+
     # ── Synthetic variants (realistic misinformation spread simulation) ───
     variants.extend(_generate_synthetic_variants(claim_id, claim_text))
 

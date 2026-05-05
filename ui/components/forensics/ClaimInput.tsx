@@ -1,6 +1,9 @@
 "use client";
 import { useState } from "react";
-import { Search, Zap, CheckCircle, Circle } from "lucide-react";
+import { Search, BookOpen, CheckCircle, Circle } from "lucide-react";
+import ScenarioLibrary from "./ScenarioLibrary";
+import type { ScenarioTemplate } from "@/types";
+import { useScenarios } from "@/hooks/useScenarios";
 
 interface Step {
   id: string;
@@ -10,18 +13,21 @@ interface Step {
 
 interface Props {
   onAnalyse: (claim: string) => void;
-  onDemo: () => void;
+  onRunScenario: (scenario: ScenarioTemplate) => void;
   isRunning: boolean;
   steps: Step[];
 }
 
-const DEMO_CLAIM =
-  "BREAKING: Rotterdam port workers have voted for indefinite strike action " +
-  "effective immediately. All soybean cargo operations halted. " +
-  "Sources: Reuters. #Rotterdam #SupplyChain";
-
-export default function ClaimInput({ onAnalyse, onDemo, isRunning, steps }: Props) {
+export default function ClaimInput({ onAnalyse, onRunScenario, isRunning, steps }: Props) {
   const [text, setText] = useState("");
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const { scenarios, loading, createScenario, deleteScenario } = useScenarios();
+
+  const handleSelectScenario = (scenario: ScenarioTemplate) => {
+    setText(scenario.claim_text);
+    setLibraryOpen(false);
+    onRunScenario(scenario);
+  };
 
   return (
     <div className="flex flex-col gap-3">
@@ -46,8 +52,7 @@ export default function ClaimInput({ onAnalyse, onDemo, isRunning, steps }: Prop
           disabled={isRunning || !text.trim()}
           className="flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-all flex-1"
           style={{
-            background:
-              isRunning || !text.trim() ? "#1E1E2E" : "#6366F1",
+            background: isRunning || !text.trim() ? "#1E1E2E" : "#6366F1",
             color: isRunning || !text.trim() ? "#475569" : "#fff",
             cursor: isRunning || !text.trim() ? "not-allowed" : "pointer",
           }}
@@ -57,19 +62,35 @@ export default function ClaimInput({ onAnalyse, onDemo, isRunning, steps }: Prop
         </button>
 
         <button
-          onClick={() => { setText(DEMO_CLAIM); onDemo(); }}
+          onClick={() => setLibraryOpen(!libraryOpen)}
           disabled={isRunning}
           className="flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-all"
           style={{
-            background: "#1E1E2E",
+            background: libraryOpen ? "#1E293B" : "#1E1E2E",
             color: isRunning ? "#475569" : "#F59E0B",
             cursor: isRunning ? "not-allowed" : "pointer",
+            border: libraryOpen ? "1px solid #F59E0B44" : "1px solid transparent",
           }}
         >
-          <Zap size={14} />
-          Demo Scenario
+          <BookOpen size={14} />
+          Library
         </button>
       </div>
+
+      {libraryOpen && !isRunning && (
+        <div
+          className="rounded-lg p-3"
+          style={{ background: "#111118", border: "1px solid #1E1E2E" }}
+        >
+          <ScenarioLibrary
+            scenarios={scenarios}
+            loading={loading}
+            onSelect={handleSelectScenario}
+            onCreate={createScenario}
+            onDelete={deleteScenario}
+          />
+        </div>
+      )}
 
       {steps.length > 0 && (
         <div

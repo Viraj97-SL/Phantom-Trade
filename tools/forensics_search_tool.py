@@ -15,6 +15,11 @@ MAJOR_OUTLETS = {
     "reuters.com", "bloomberg.com", "ft.com", "wsj.com", "apnews.com",
     "bbc.com", "bbc.co.uk", "theguardian.com", "nytimes.com",
     "cnbc.com", "marketwatch.com", "tradingeconomics.com",
+    # Extended tier-1 and quality international outlets
+    "economist.com", "axios.com", "semafor.com", "politico.com",
+    "foreignpolicy.com", "dw.com", "aljazeera.com", "scmp.com",
+    "japantimes.co.jp", "nikkei.com", "gulfnews.com", "lemonde.fr",
+    "spiegel.de", "handelsblatt.com",
 }
 
 PORT_NAMES = [
@@ -135,9 +140,31 @@ def _synthetic_news_results(claim_text: str, entities: dict) -> dict:
 async def search_claim_in_news(claim_text: str, topics: List[str]) -> dict:
     """
     Cross-reference a claim against real news sources.
+    Delegates to the multi-source aggregator when available; falls back to Tavily-only.
     Returns structured corroboration/contradiction dict for forensics and debate agents.
     """
     entities = extract_claim_entities(claim_text)
+
+    try:
+        from tools.sources.aggregator import fan_out_search
+        ctx = await fan_out_search(claim_text, entities)
+        return {
+            "corroborating_sources": ctx.corroborating_sources,
+            "contradicting_sources": ctx.contradicting_sources,
+            "total_coverage": ctx.total_coverage,
+            "major_outlets_reporting": ctx.major_outlets_reporting,
+            "source_claimed": ctx.source_claimed,
+            "source_claimed_verified": ctx.source_claimed_verified,
+            "fabrication_signals": ctx.fabrication_signals,
+            "summary": ctx.summary,
+            "gdelt_event_count": ctx.gdelt_event_count,
+            "rss_corroboration": ctx.rss_corroboration,
+            "wayback_verified": ctx.wayback_verified,
+            "reddit_sentiment": ctx.reddit_sentiment,
+            "sources_breakdown": ctx.sources_breakdown,
+        }
+    except Exception as exc:
+        log.warning("Multi-source aggregator failed — falling back to Tavily-only", error=str(exc))
 
     # Build targeted Brave queries
     queries: List[str] = []

@@ -3,13 +3,13 @@ import { Zap, RefreshCw, BarChart2 } from "lucide-react";
 import { api } from "@/lib/api";
 
 interface Props {
-  onInject: () => void;
+  onRunDefault: () => void;
   onReset: () => void;
   recentEvent?: string;
   isRunning?: boolean;
 }
 
-export default function DemoControlBar({ onInject, onReset, recentEvent, isRunning }: Props) {
+export default function DemoControlBar({ onRunDefault, onReset, recentEvent, isRunning }: Props) {
   const handleReset = async () => {
     try {
       await api.resetDemo();
@@ -26,7 +26,7 @@ export default function DemoControlBar({ onInject, onReset, recentEvent, isRunni
     >
       <div className="flex items-center gap-3">
         <button
-          onClick={onInject}
+          onClick={onRunDefault}
           disabled={isRunning}
           className="flex items-center gap-2 px-4 py-1.5 rounded-md text-sm font-medium transition-all"
           style={{
@@ -36,7 +36,7 @@ export default function DemoControlBar({ onInject, onReset, recentEvent, isRunni
           }}
         >
           <Zap size={14} />
-          Inject Rotterdam Claim
+          Run Default Scenario
         </button>
 
         <button

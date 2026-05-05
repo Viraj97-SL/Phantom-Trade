@@ -170,6 +170,15 @@ def _build_context(
             + ("\n".join(f"    - {s}" for s in fab_sigs[:5]) if fab_sigs else "    none detected")
         )
 
+        ml = news_context.get("ml_result")
+        if ml:
+            ml_flags = ml.get("ml_flags", [])[:5]
+            news_block += (
+                f"\n\nML FORENSICS SIGNALS (composite={ml.get('composite_ml_score', 0.5):.2f}, "
+                f"coordinated={ml.get('coordinated_campaign_flag', False)}):\n"
+                + ("\n".join(f"    - {f}" for f in ml_flags) if ml_flags else "    none")
+            )
+
     return (
         f'CLAIM TO ANALYSE:\n"{claim_text}"\n\n'
         f"VARIANTS FOUND ({len(variants)} across platforms):\n{variant_lines}\n\n"

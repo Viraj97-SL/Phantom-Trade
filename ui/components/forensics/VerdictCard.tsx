@@ -2,6 +2,8 @@
 import { useState } from "react";
 import { ChevronDown, ChevronUp, AlertTriangle, CheckCircle, HelpCircle } from "lucide-react";
 import { verdictColor, formatDate } from "@/lib/utils";
+import MLScoreCard from "./MLScoreCard";
+import EvidenceBreakdown from "./EvidenceBreakdown";
 import type { ClaimVerdict } from "@/types";
 
 interface Props {
@@ -23,20 +25,15 @@ export default function VerdictCard({ verdict }: Props) {
   const proAuthLine = debateLines.find((l) => l.startsWith("PRO-AUTHENTIC"));
   const proFabLine = debateLines.find((l) => l.startsWith("PRO-FABRICATED"));
 
-  const proAuthScore = parseFloat(
-    proAuthLine?.match(/\((\d+\.\d+)\)/)?.[1] ?? "0"
-  );
-  const proFabScore = parseFloat(
-    proFabLine?.match(/\((\d+\.\d+)\)/)?.[1] ?? "0"
-  );
+  const proAuthScore = parseFloat(proAuthLine?.match(/\((\d+\.\d+)\)/)?.[1] ?? "0");
+  const proFabScore = parseFloat(proFabLine?.match(/\((\d+\.\d+)\)/)?.[1] ?? "0");
 
   return (
     <div
       className="rounded-lg p-4 flex flex-col gap-3 animate-slide-up"
       style={{
         background: "#111118",
-        borderLeft: `4px solid ${color}`,
-        border: `1px solid #1E1E2E`,
+        border: "1px solid #1E1E2E",
         borderLeftColor: color,
         borderLeftWidth: "4px",
       }}
@@ -82,6 +79,9 @@ export default function VerdictCard({ verdict }: Props) {
         {verdict.created_at && ` · ${formatDate(verdict.created_at)}`}
       </div>
 
+      {/* ML forensics card */}
+      {verdict.ml_result && <MLScoreCard ml={verdict.ml_result} />}
+
       {/* Evidence collapsible */}
       {verdict.evidence.length > 0 && (
         <div>
@@ -94,12 +94,8 @@ export default function VerdictCard({ verdict }: Props) {
             Evidence ({verdict.evidence.length})
           </button>
           {evidenceOpen && (
-            <div className="mt-2 flex flex-col gap-1.5">
-              {verdict.evidence.map((e, i) => (
-                <div key={i} className="text-xs" style={{ color: "#94A3B8" }}>
-                  · {e.description}
-                </div>
-              ))}
+            <div className="mt-2">
+              <EvidenceBreakdown evidence={verdict.evidence} />
             </div>
           )}
         </div>
@@ -138,6 +134,15 @@ export default function VerdictCard({ verdict }: Props) {
                 </div>
                 <span style={{ color: "#94A3B8" }}>{proFabScore.toFixed(2)}</span>
               </div>
+              {debateOpen && verdict.debate_transcript && (
+                <div
+                  className="text-xs mt-1 p-2 rounded"
+                  style={{ background: "#0A0A0F", color: "#64748B", whiteSpace: "pre-wrap" }}
+                >
+                  {verdict.debate_transcript.slice(0, 600)}
+                  {verdict.debate_transcript.length > 600 && "…"}
+                </div>
+              )}
             </div>
           )}
         </div>

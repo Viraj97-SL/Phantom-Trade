@@ -13,7 +13,8 @@ from langsmith import traceable
 from db.connection import get_db
 from agents.forensics.tracker_agent import track_claim_variants, get_variants_for_claim
 from agents.forensics.debate_agent import run_debate
-from models.schemas import ClaimVariant, ClaimVerdict, EvidenceItem, ForensicsReport
+from models.schemas import ClaimVariant, ClaimVerdict, EvidenceItem, ForensicsReport, MLForensicsResult
+from tools.ml import score_claim_ml
 from tools.forensics_search_tool import search_claim_in_news
 from utils.llm import get_haiku
 from utils.logging import get_logger
@@ -53,8 +54,11 @@ async def analyse_claim(claim_text: str, media_url: Optional[str] = None) -> Cla
              major_outlets=news_context.get("major_outlets_reporting"),
              total_coverage=news_context.get("total_coverage"))
 
-    # ── STEP 3: LLM forensics on each variant ────────────────────────────
-    forensics_reports = await _run_llm_forensics(variants, claim_text, news_context)
+    # ── STEP 3: LLM forensics + ML scoring in parallel ───────────────────
+    forensics_reports, ml_result = await asyncio.gather(
+        _run_llm_forensics(variants, claim_text, news_context),
+        score_claim_ml(claim_id, variants, claim_text, news_context),
+    )
 
     # ── STEP 4: Mutation graph (MongoDB $graphLookup provenance traversal) ───
     mutation_summary = await _build_mutation_graph_summary(claim_id, variants, news_context)
@@ -63,12 +67,13 @@ async def analyse_claim(claim_text: str, media_url: Optional[str] = None) -> Cla
     variant_dicts = [v.model_dump() for v in variants]
     report_dicts = [r.model_dump() for r in forensics_reports]
 
+    news_context_with_ml = {**news_context, "ml_result": ml_result.model_dump()}
     debate_verdict = await run_debate(
         claim_id=claim_id,
         claim_text=claim_text,
         forensics_reports=report_dicts,
         variants=variant_dicts,
-        news_context=news_context,
+        news_context=news_context_with_ml,
     )
 
     # ── STEP 6: Build evidence items ─────────────────────────────────────
@@ -90,6 +95,7 @@ async def analyse_claim(claim_text: str, media_url: Optional[str] = None) -> Cla
             f"{debate_verdict.pro_fabricated_reasoning[:300]}"
         ),
         supply_chain_topics=topics,
+        ml_result=ml_result,
     )
 
     await db.claim_verdicts.insert_one(verdict.model_dump())
